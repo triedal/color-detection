@@ -2,8 +2,19 @@
 #include <opencv2/imgproc/imgproc.hpp>
 #include <string>
 #include <iostream>
+
 using namespace cv;
 using namespace std;
+
+void createController(const char *window_name, int &low_sat, int &high_sat, int &low_val, int &high_val) {
+  namedWindow(window_name, CV_WINDOW_AUTOSIZE);
+
+  // Create trackbars to get Saturtion and Value
+  cvCreateTrackbar("Low Saturtion", window_name, &low_sat, 255);
+  cvCreateTrackbar("High Saturtion", window_name, &high_sat, 255);
+  cvCreateTrackbar("Low Value", window_name, &low_val, 255);
+  cvCreateTrackbar("High Value", window_name, &high_val, 255);
+}
  
 int main(int argc, char** argv) {
 
@@ -14,18 +25,12 @@ int main(int argc, char** argv) {
     return -1;
   }
 
-  int low_sat = 0;
+  int low_sat = 167;
   int high_sat = 255;
-  int low_val = 0;
+  int low_val = 33;
   int high_val = 255;
 
-  namedWindow("Control", CV_WINDOW_AUTOSIZE);
-
-  // Create trackbars to get Saturtion and Value
-  cvCreateTrackbar("Low Saturtion", "Control", &low_sat, 255);
-  cvCreateTrackbar("High Saturtion", "Control", &high_sat, 255);
-  cvCreateTrackbar("Low Value", "Control", &low_val, 255);
-  cvCreateTrackbar("High Value", "Control", &high_val, 255);
+  createController("Controls", low_sat, high_sat, low_val, high_val);
  
   while (true) {
 
@@ -35,10 +40,14 @@ int main(int argc, char** argv) {
      * R (red)
      */ 
 
-    Mat bgr_image;
-    video_stream.read(bgr_image);
+    Mat bgr_image,
+        hsv_image,
+        lower_red_hue_range,
+        upper_red_hue_range,
+        red_hue_image,
+        red_hue_image_binary;
 
-    Mat hsv_image;
+    video_stream.read(bgr_image);
 
     // Convert BGR image to HSV
     cvtColor(bgr_image, hsv_image, COLOR_BGR2HSV);
@@ -49,15 +58,51 @@ int main(int argc, char** argv) {
      * V (value): amount of black
      */ 
 
-    Mat lower_red_hue_range;
-    Mat upper_red_hue_range;
-
     // Threshold the HSV image, keep only the red pixels
     inRange(hsv_image, Scalar(0, low_sat, low_val), Scalar(10, high_sat, high_val), lower_red_hue_range);
     inRange(hsv_image, Scalar(160, low_sat, low_val), Scalar(179, high_sat, high_val), upper_red_hue_range);
 
-    Mat red_hue_image;
     addWeighted(lower_red_hue_range, 1.0, upper_red_hue_range, 1.0, 0.0, red_hue_image);
+
+    // Morphological opening (remove small noise objects)
+    erode(red_hue_image, red_hue_image, getStructuringElement(MORPH_ELLIPSE, Size(5, 5)));
+    erode(red_hue_image, red_hue_image, getStructuringElement(MORPH_ELLIPSE, Size(5, 5)));
+    dilate(red_hue_image, red_hue_image, getStructuringElement(MORPH_ELLIPSE, Size(5, 5)));
+    dilate(red_hue_image, red_hue_image, getStructuringElement(MORPH_ELLIPSE, Size(5, 5)));
+
+    // Morphological closing (fill in small holes in target object)
+    dilate(red_hue_image, red_hue_image, getStructuringElement(MORPH_ELLIPSE, Size(5, 5)));
+    erode(red_hue_image, red_hue_image, getStructuringElement(MORPH_ELLIPSE, Size(5, 5)));
+
+    threshold(red_hue_image, red_hue_image_binary, 150, 255, CV_THRESH_BINARY);
+
+    vector<vector<Point> > contours;
+    vector<Vec4i> hierarchy;
+    int largest_area, largest_idx = 0;
+
+    findContours(red_hue_image_binary, contours, hierarchy, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_SIMPLE);
+
+    vector<Rect> boundRect( contours.size() );
+    vector<vector<Point> > contours_poly( contours.size() );
+
+    for (int i = 0; i < contours.size(); i++) {
+      double area = contourArea(contours[i]);
+
+      if (area > largest_area) {
+        largest_area = area;
+        largest_idx = i;
+      }
+    } 
+
+     for ( int i = 0; i < contours.size(); i++ ) { 
+         approxPolyDP( Mat(contours[i]), contours_poly[i], 3, true );
+         boundRect[i] = boundingRect( Mat(contours_poly[i]) );
+     }
+
+     for ( int i = 0; i< contours.size(); i++ ) {
+         Scalar color = Scalar(0, 255, 0);
+         rectangle( bgr_image, boundRect[i].tl(), boundRect[i].br(), color, 2, 8, 0 );          
+     }
 
     // Overlay text
     putText(red_hue_image, "Low Saturtion: " + to_string(low_sat), cvPoint(30, 30), FONT_HERSHEY_COMPLEX_SMALL,
